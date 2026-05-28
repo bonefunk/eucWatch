@@ -231,6 +231,17 @@
 			{"name":"calc","url":"../../P8-testing/calc/calc.js"}
 		]
 	},
+		{ "id": "sail",
+		"name": "Sailing Timer",
+		"icon": "../../P8-testing/sail/icon.png",
+		"version":"0.01",
+		"description": "3-minute sailing race start timer with haptic countdown cues.",
+		"tags": "apps",
+	    "needsFeatures":["V1"],
+		"storage": [
+			{"name":"sail","url":"../../P8-testing/sail/sail.js"}
+		]
+	},
 	{ "id": "rotate",
 		"name": "Screen rotate",
 		"icon": "../../P8-testing/rotate/icon.png",

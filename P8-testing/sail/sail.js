@@ -113,28 +113,29 @@ face[0] = {
 
 touchHandler[0] = function (e, x, y) {
   if (e == 5) {
-    // Tap: start if idle, reset if running
-    if (A) {
-      A = 0;
-      R = T;
-    } else {
+    // Tap: start ONLY if idle (no reset while running)
+    if (!A) {
       R = T;
       S = Date.now();
       A = 1;
-      C();
+      C();   // start cue buzz
+      F();   // draw immediately
+    } else {
+      // Optional: tiny feedback so you know the tap was ignored
+      // Comment this out if you want it completely silent.
+      B(40);
     }
-
-    F();
   } else if (e == 12) {
-    // Long press: reset
+    // Long press: intentional reset
     A = 0;
     R = T;
     F();
     B([100, 50, 80]);
   } else if (e == 1) {
-    // Swipe down/back: return to main
+    // Swipe down/back: return to main (optional)
     face.go("main", 0);
   }
 
   this.timeout();
 };
+

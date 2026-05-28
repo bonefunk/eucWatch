@@ -53,7 +53,7 @@ if (require("Storage").read("alarm",1)) {
 g.flip();
 
 //app5
-this.appDo4="face.go('sail',0)";
+this.appDo5="face.go('sail',0)";
 g.setColor(1,1);
 g.fillRect(80,80,155,155);
 g.setColor(0,15);

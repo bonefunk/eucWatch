@@ -245,7 +245,7 @@
 	
 		{ "id": "stopwatch",
 		  "name": "Stopwatch",
-		  "icon": "../../P8-testing/stopwatch/icon.png",
+		  "icon": "../../P8-testing/stopwatch/stopwatch_icon.png",
 		  "version": "0.01",
 		  "description": "Stopwatch with heart rate display for cardio sessions.",
 		  "tags": "apps",

@@ -523,19 +523,18 @@
 			{"name":"w_scan","url":"../../P8-testing/w_scan/w_scan.js"}
 		]
 	},
-	{
-  		"id": "sail",
+	{ "id": "sail",
   		"name": "Sailing Timer",
   		"icon": "../../P8-testing/sail/icon.png",
   		"version": "0.01",
   		"description": "3-minute sailing race start timer with haptic countdown cues.",
   		"tags": "apps",
   		"readme": "README.md",
-  		"needsFeatures": ["V2"],
+  		"needsFeatures": ["V1"],
   		"storage": [
     		{"name": "sail","url": "../../P8-testing/sail/sail.js"}
   		]
-	}
+	},
 	{ "id": "w_testTP",
 		"name": "Touch panel tester",
 		"icon": "../../P8-testing/w_testTP/icon.png",

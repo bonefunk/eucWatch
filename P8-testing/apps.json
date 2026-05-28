@@ -521,5 +521,16 @@
 		"storage": [
 			{"name":"w_testTP","url":"w_testTP.js"}
 		]
+	},
+	{ "id": "sail",
+  		"name": "Sailing Timer",
+  		"icon": "icon.png",
+  		"version": "0.01",
+  		"description": "A 3-minute sailing race start timer with haptic countdown cues.",
+  		"tags": "apps",
+  		"readme": "README.md",
+  		"storage": [
+    		{"name": "sail","url": "sail.js"}
+  		]
 	}
 ]

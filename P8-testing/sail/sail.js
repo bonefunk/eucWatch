@@ -13,15 +13,22 @@ function F() {
   var s = R % 60;
   var t = m + ":" + ("0" + s).substr(-2);
 
-  G.clear();
+  // Determine screen size (fallback to 240x240)
+  var W = (G.getWidth ? G.getWidth() : 240);
+  var H = (G.getHeight ? G.getHeight() : 240);
 
+  // Explicit background fill (do NOT rely on G.clear())
+  G.setColor(0, 0);
+  G.fillRect(0, 0, W - 1, H - 1);
+
+  // Foreground text
   G.setColor(1, 15);
   G.setFont("Vector", 60);
-  G.drawString(t, 120 - G.stringWidth(t) / 2, 70);
+  G.drawString(t, (W - G.stringWidth(t)) / 2, 70);
 
   G.setFont("Vector", 20);
-  t = A ? "RUN" : "TAP";
-  G.drawString(t, 120 - G.stringWidth(t) / 2, 160);
+  var status = A ? "RUN" : "TAP";
+  G.drawString(status, (W - G.stringWidth(status)) / 2, 160);
 
   G.flip();
 }

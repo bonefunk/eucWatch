@@ -242,6 +242,19 @@
 			{"name":"sail","url":"../../P8-testing/sail/sail.js"}
 		]
 	},
+	
+		{ "id": "stopwatch",
+		  "name": "Stopwatch",
+		  "icon": "../../P8-testing/stopwatch/icon.png",
+		  "version": "0.01",
+		  "description": "Stopwatch with heart rate display for cardio sessions.",
+		  "tags": "apps",
+		  "needsFeatures": ["V1"],
+		  "storage": [
+		    { "name": "stopwatch", "url": "../../P8-testing/stopwatch/stopwatch.js" }
+		  ]
+	},
+
 	{ "id": "rotate",
 		"name": "Screen rotate",
 		"icon": "../../P8-testing/rotate/icon.png",

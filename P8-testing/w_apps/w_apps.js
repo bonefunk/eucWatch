@@ -59,6 +59,7 @@ g.setColor(0,15);
 if (require("Storage").read("sail",1)) {
 	this.appDo5="face.go('sail',0)";
 	this.img = E.toArrayBuffer(atob("MDCBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAYAAAAAAAdAAAAAAAdAAAAAADdgAAAAADdgAAAAAHdwAAAAAHdwAAAAAPd4AAAAAfd8AAAAAfd8AAAAA/d+AAAAA/d+AAAAB/d/AAAAB/d/AAAAD/d/gAAAH/d/gAAAH/d/wAAAP/d/wAAAP/d/4AAAf/d/4AAA//d/8AAA//d/8AAA/+d/+AAAAAd/+AAAAAd/+AAAAAcAAAAAAAYAAAAD/////AAB/////AAB////+AAA////8AAAf///4AAAP///4AAAP///wAAAH///gAAAD///AAAAAAAAAAAf/+B//4Af//B//8AP/+A//4AAAAAAAAA=="));
+	g.drawImage(this.img,94,94);
 }else g.drawImage(this.appImgNone,94,94);
 g.flip();
 //app6

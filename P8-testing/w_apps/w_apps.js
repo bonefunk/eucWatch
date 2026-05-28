@@ -38,7 +38,6 @@ if (global.tpms) {
 	g.drawImage(this.img,176,15);
 }else g.drawImage(this.appImgNone,176,15);
 g.flip();
-
 //app4
 //this.appDo4="face.go('alarm',0)";
 g.setColor(1,1);
@@ -50,20 +49,18 @@ if (require("Storage").read("alarm",1)) {
 	//hello this.img=require("heatshrink").decompress(atob("mEwwIIFn4FKmYFHv/ggYFBgf//kD2cAh/An8B+cAngNB4AFBuAZB8F/gPgAoN4j0DwAFBjkMgYuCh0GgwFCAgMMAoUDg0cAoeGjEHwEegOGmEfFoOA4cwjFgsIFBsBwB4HAsYFL8AFDufADocz4ApDAoI1CPoPAQYgFEn4FKFgIFEPgQABuFgAodgApcx/wFC4AFFjCnCgOAjk4RIWAhhRBAoKdBg/AnilBg8B//4hwTCKAKlBYohJCaIQCBboYFBdIS8DeoJQDv4WCA"));
 	g.drawImage(this.img,13,94);
 }else g.drawImage(this.appImgNone,13,94);
-g.flip();
 
+g.flip();
 //app5
-this.appDo5="face.go('sail',0)";
+//this.appDo5="face.go('sail',0)";
 g.setColor(1,1);
 g.fillRect(80,80,155,155);
 g.setColor(0,15);
 if (require("Storage").read("sail",1)) {
 	this.appDo5="face.go('sail',0)";
 	this.img = E.toArrayBuffer(atob("MDCBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAYAAAAAAAdAAAAAAAdAAAAAADdgAAAAADdgAAAAAHdwAAAAAHdwAAAAAPd4AAAAAfd8AAAAAfd8AAAAA/d+AAAAA/d+AAAAB/d/AAAAB/d/AAAAD/d/gAAAH/d/gAAAH/d/wAAAP/d/wAAAP/d/4AAAf/d/4AAA//d/8AAA//d/8AAA/+d/+AAAAAd/+AAAAAd/+AAAAAcAAAAAAAYAAAAD/////AAB/////AAB////+AAA////8AAAf///4AAAP///4AAAP///wAAAH///gAAAD///AAAAAAAAAAAf/+B//4Af//B//8AP/+A//4AAAAAAAAA=="));
-	g.drawImage(this.img,94,94);
 }else g.drawImage(this.appImgNone,94,94);
 g.flip();
-
 //app6
 g.setColor(1,1);
 g.fillRect(160,80,239,155);

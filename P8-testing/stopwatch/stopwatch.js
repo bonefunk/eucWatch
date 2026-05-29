@@ -1,5 +1,12 @@
 // stopwatch.js
 // Cardio stopwatch with HRS3300 heart-rate (eucWatch / P8 / P22)
+// Stability-focused version:
+// - H:MM:SS display (single-digit hours)
+// - all-white text
+// - side button is the supported exit path
+// - swipe ignored for now
+// - HR only while stopwatch is running
+// - aggressive cleanup on exit
 
 var G = w.gfx;
 
@@ -10,6 +17,7 @@ var running = 0;
 var t0 = 0;
 var acc = 0;
 var drawTid = 0;
+var lastLine = "";
 var ignoreTapUntil = 0;
 
 // ----------------------
@@ -23,8 +31,8 @@ var hrRaw = 0;
 
 // Cardio-tuned constants
 var HR_FS_MS   = 40;   // 25 Hz
-var HR_WIN     = 25;   // ~1 second
-var HR_REFRACT = 400;  // more responsive than 500
+var HR_WIN     = 25;   // ~1 second window
+var HR_REFRACT = 400;  // allow higher HR than the old 500 ms setting
 var HR_THR_MUL = 1.15;
 var HR_THR_MIN = 25;
 
@@ -38,7 +46,7 @@ var hrPrevAc = 0, hrRising = false, hrPeakAc = 0, hrLastPeak = 0, hrLastBeat = 0
 // Helpers
 // ----------------------
 
-// Format as H:MM:SS (single hour digit, no subseconds)
+// H:MM:SS with single-digit hours
 function fmt(ms) {
   if (ms < 0) ms = 0;
   var total = (ms / 1000) | 0;
@@ -52,9 +60,10 @@ function fmt(ms) {
          (ss < 10 ? "0" : "") + ss;
 }
 
+// Use only the handler-provided i2c bus.
+// Your earlier version fell back to I2C1 as well, but that path is not reliable
 function getBus() {
   if (typeof i2c !== "undefined" && i2c && i2c.writeTo && i2c.readFrom) return i2c;
-  if (typeof I2C1 !== "undefined" && I2C1 && I2C1.writeTo && I2C1.readFrom) return I2C1;
   return null;
 }
 
@@ -78,6 +87,7 @@ function hrEnable() {
   var bus = getBus();
   if (!bus) return false;
 
+  // HRS3300 ID register should be 0x21
   var id = hrReadReg(bus, 0x00);
   if (id !== 0x21) return false;
 
@@ -90,14 +100,29 @@ function hrEnable() {
   return true;
 }
 
-function hrDisable(keepValue) {
+function hrDisable(clearValue) {
   var bus = getBus();
   if (bus) {
     hrWriteReg(bus, 0x01, 0x00);
     hrWriteReg(bus, 0x0C, 0x48);
   }
   hrOn = 0;
-  if (!keepValue) hrBpm = null;
+  if (clearValue) hrBpm = null;
+}
+
+// Reset HR estimator state
+function hrResetState(clearValue) {
+  hrI = 0;
+  hrFilled = 0;
+  hrSum = 0;
+  hrAbsSum = 0;
+  hrPrevAc = 0;
+  hrRising = false;
+  hrPeakAc = 0;
+  hrLastPeak = 0;
+  hrLastBeat = 0;
+  hrRaw = 0;
+  if (clearValue) hrBpm = null;
 }
 
 function hrTick() {
@@ -133,6 +158,7 @@ function hrTick() {
 
   var now = Date.now();
 
+  // Peak detect: rising then falling
   if (ac > hrPrevAc) {
     hrRising = true;
     if (ac > hrPeakAc) hrPeakAc = ac;
@@ -145,6 +171,7 @@ function hrTick() {
       if (hrLastBeat) {
         var inst = 60000 / (now - hrLastBeat);
         if (inst >= 40 && inst <= 200) {
+          // More responsive than the old 0.85/0.15 smoothing
           hrBpm = hrBpm ? (0.7 * hrBpm + 0.3 * inst) : inst;
           hrBpm = hrBpm | 0;
         }
@@ -160,28 +187,22 @@ function hrTick() {
 
 function hrStartLoop() {
   if (hrTickId) return;
+  hrResetState(true);
   if (!hrEnable()) return;
-
-  hrI = 0; hrFilled = 0; hrSum = 0; hrAbsSum = 0;
-  hrPrevAc = 0; hrRising = false; hrPeakAc = 0; hrLastPeak = 0; hrLastBeat = 0;
-  hrBpm = null;
-
   hrTickId = setInterval(hrTick, HR_FS_MS);
 }
 
-function hrStopLoop(keepValue) {
+function hrStopLoop(clearValue) {
   if (hrTickId) {
     clearInterval(hrTickId);
     hrTickId = 0;
   }
-  hrDisable(keepValue);
+  hrDisable(clearValue);
 }
 
 // ----------------------
 // Drawing
 // ----------------------
-var lastLine = "";
-
 function draw(force) {
   var now = Date.now();
   var elapsed = acc + (running ? (now - t0) : 0);
@@ -200,13 +221,13 @@ function draw(force) {
   G.setColor(0, 0);
   G.fillRect(0, 0, W - 1, H - 1);
 
-  // White text only
+  // All text in white
   G.setColor(1, 15);
 
-  // Main stopwatch line: slightly smaller and nudged right
-  // so the left side doesn’t clip
-  G.setFont("Vector", 50);
-  G.drawString(line1, ((W - G.stringWidth(line1)) / 2) + 4, 70);
+  // Main time line:
+  // smaller than before, slightly nudged right so left edge doesn't clip
+  G.setFont("Vector", 46);
+  G.drawString(line1, ((W - G.stringWidth(line1)) / 2) + 6, 72);
 
   G.setFont("Vector", 18);
   G.drawString(line3, (W - G.stringWidth(line3)) / 2, 135);
@@ -215,7 +236,7 @@ function draw(force) {
   G.drawString(line2, (W - G.stringWidth(line2)) / 2, 165);
 
   G.setFont("Vector", 14);
-  var hint = running ? "TAP: STOP   SWIPE: EXIT" : "TAP: START   LONG: RESET";
+  var hint = running ? "TAP: STOP   BTN: EXIT" : "TAP: START   LONG: RESET";
   G.drawString(hint, (W - G.stringWidth(hint)) / 2, 205);
 
   G.flip();
@@ -223,19 +244,31 @@ function draw(force) {
 
 function drawLoop() {
   draw(false);
-  // slower redraw; no need for 100ms without subseconds
-  drawTid = setTimeout(drawLoop, 250);
+  // much slower redraw than before
+  drawTid = setTimeout(drawLoop, 500);
 }
 
 // ----------------------
 // Cleanup
 // ----------------------
-function stopAll(keepHrValue) {
+
+// Strong cleanup so the watch doesn't stay unstable after exit
+function hardCleanup(clearHrValue) {
   if (drawTid) {
     clearTimeout(drawTid);
     drawTid = 0;
   }
-  hrStopLoop(keepHrValue);
+
+  hrStopLoop(clearHrValue);
+
+  running = 0;
+  t0 = 0;
+  acc = 0;
+
+  hrResetState(clearHrValue);
+
+  lastLine = "";
+  ignoreTapUntil = Date.now() + 500;
 }
 
 // ----------------------
@@ -245,6 +278,7 @@ function startSW() {
   if (running) return;
   running = 1;
   t0 = Date.now();
+
   if (buzzer && buzzer.sys) buzzer.sys(80);
 
   // Start HR only while timing
@@ -254,24 +288,31 @@ function startSW() {
 
 function stopSW() {
   if (!running) return;
+
   acc += (Date.now() - t0);
   running = 0;
+
   if (buzzer && buzzer.sys) buzzer.sys([80, 120, 80]);
 
-  // stop HR but keep last displayed value
-  hrStopLoop(true);
+  // Stop HR immediately when stopping stopwatch.
+  // This is more stable than preserving it indefinitely.
+  hrStopLoop(false);
   draw(true);
 }
 
 function resetSW() {
+  // Only allow reset when stopped
   if (running) {
     if (buzzer && buzzer.sys) buzzer.sys(40);
     return;
   }
+
   acc = 0;
   t0 = 0;
   hrBpm = null;
+
   if (buzzer && buzzer.sys) buzzer.sys([100, 50, 80]);
+
   draw(true);
 }
 
@@ -282,14 +323,15 @@ face[0] = {
   offms: 600000,
 
   init: function () {
-    stopAll(false); // defensive cleanup
+    // Defensive cleanup in case an old instance left anything behind
+    hardCleanup(true);
 
     running = 0;
     acc = 0;
     t0 = 0;
+    hrBpm = null;
     lastLine = "";
     ignoreTapUntil = 0;
-    hrBpm = null;
 
     draw(true);
     drawLoop();
@@ -302,34 +344,34 @@ face[0] = {
   },
 
   clear: function () {
-    stopAll(false);
+    hardCleanup(true);
     return 1;
   },
 
   off: function () {
     G.off();
-    stopAll(false);
+    hardCleanup(true);
   }
 };
 
-// Touch model follows the same eucWatch pattern as calculator:
-// tap=e==5, swipe down=e==1, long press=e==12. [1](https://amwater-my.sharepoint.com/personal/jesse_quadrel_amwater_com/Documents/Microsoft%20Copilot%20Chat%20Files/stopwatch.js)
+// Touch model follows the same general event scheme the calculator uses,
+// but swipe is intentionally ignored for now because it was unreliable
 touchHandler[0] = function (e, x, y) {
   var now = Date.now();
 
   if (e == 1) {
-    // Swipe down to exit
-    ignoreTapUntil = now + 500;
+    // Ignore swipe for now.
+    // Side button is the supported exit path until swipe behavior is fully mapped.
     this.timeout();
-    face.go("main", 0);
     return;
   }
 
   if (e == 12) {
     // Long press resets only when stopped
     resetSW();
-    // Ignore the synthetic tap that often follows a long press
-    ignoreTapUntil = now + 800;
+
+    // Ignore the follow-up tap that often fires after long press
+    ignoreTapUntil = now + 1200;
     this.timeout();
     return;
   }

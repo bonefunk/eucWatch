@@ -9,7 +9,8 @@ var G = w.gfx;
 var running = 0;   // 0/1
 var t0 = 0;        // start timestamp (ms)
 var acc = 0;       // accumulated elapsed (ms)
-var drawTid = -1;  // draw loop timeout
+var drawTid = 0;   // draw loop timeout
+var ignoreTapUntil = 0; // suppress stray tap after long press / exit
 
 // ----------------------
 // HRM (HRS3300) state
@@ -20,15 +21,14 @@ var hrTickId = 0;
 var hrBpm = null;
 var hrRaw = 0;
 
-// Tuned constants from your “looks good” run:
-// - threshold multiplier 1.2
-// - REFRACT 500ms (conservative; good for avoiding false high bpm)
-// These can be relaxed later for higher HR ranges.
-var HR_FS_MS   = 40;   // 25 Hz sampling cadence (device streams PPG samples to host) [1](https://infinitime.io/)
+// Cardio-tuned constants:
+// - More responsive than the old resting-biased profile
+// - Still conservative enough to avoid a lot of false highs
+var HR_FS_MS   = 40;   // 25 Hz
 var HR_WIN     = 25;   // ~1 second window
-var HR_REFRACT = 500;  // ms (max 120 bpm). Lower later for exercise, e.g. 420.
-var HR_THR_MUL = 1.2;  // dynamic threshold multiplier
-var HR_THR_MIN = 25;   // floor threshold
+var HR_REFRACT = 400;  // was 500; allows up to ~150 bpm
+var HR_THR_MUL = 1.15; // slightly easier to trigger on real beats
+var HR_THR_MIN = 25;
 
 // Moving window + peak detect
 var hrBuf = new Array(HR_WIN);
@@ -52,9 +52,7 @@ function fmt(ms) {
          (cs < 10 ? "0" : "") + cs;
 }
 
-// In app runtime, eucWatch handler usually exposes a working I2C wrapper as global `i2c`.
-// We'll try to use it if available; otherwise fall back to I2C1 if present.
-// If neither works, HR will show “--”.
+// Use the handler-provided i2c if available; otherwise try I2C1
 function getBus() {
   if (typeof i2c !== "undefined" && i2c && i2c.writeTo && i2c.readFrom) return i2c;
   if (typeof I2C1 !== "undefined" && I2C1 && I2C1.writeTo && I2C1.readFrom) return I2C1;
@@ -70,7 +68,7 @@ function hrWriteReg(bus, reg, val) {
   bus.writeTo(HR_ADDR, reg, val);
 }
 
-// CH0 sample read (registers documented for HRS3300 CH0 at 0x09/0x0A/0x0F) [1](https://infinitime.io/)
+// CH0 sample read
 function hrReadCH0(bus) {
   var m = hrReadReg(bus, 0x09);
   var h = hrReadReg(bus, 0x0A);
@@ -78,37 +76,35 @@ function hrReadCH0(bus) {
   return (m << 8) | ((h & 0x0F) << 4) | (l & 0x0F);
 }
 
-// Power/config on (uses documented control registers and values you verified)
-// - ID reg 0x00 = 0x21, addr 0x44 [1](https://infinitime.io/)[2](https://pine64.org/devices/pinetime/)
+// Power/config on
 function hrEnable() {
   var bus = getBus();
   if (!bus) return false;
 
-  // Confirm sensor ID (0x00 should be 0x21) [1](https://infinitime.io/)
   var id = hrReadReg(bus, 0x00);
   if (id !== 0x21) return false;
 
-  // PON/driver (0x0C), resolution (0x16), gain (0x17), enable (0x01) [1](https://infinitime.io/)
-  hrWriteReg(bus, 0x0C, 0x68);
-  hrWriteReg(bus, 0x16, 0x66);
-  hrWriteReg(bus, 0x17, 0x10);
-  hrWriteReg(bus, 0x01, 0xE8); // force enable bit
+  hrWriteReg(bus, 0x0C, 0x68); // PON + driver
+  hrWriteReg(bus, 0x16, 0x66); // resolution
+  hrWriteReg(bus, 0x17, 0x10); // gain
+  hrWriteReg(bus, 0x01, 0xE8); // enable forced
 
   hrOn = 1;
   return true;
 }
 
-function hrDisable() {
+// keepValue=true => power down sensor but keep last bpm visible
+function hrDisable(keepValue) {
   var bus = getBus();
-  if (!bus) return;
-  // disable + power down oscillator/driver (0x01 and 0x0C) [1](https://infinitime.io/)
-  hrWriteReg(bus, 0x01, 0x00);
-  hrWriteReg(bus, 0x0C, 0x48);
+  if (bus) {
+    hrWriteReg(bus, 0x01, 0x00);
+    hrWriteReg(bus, 0x0C, 0x48);
+  }
   hrOn = 0;
-  hrBpm = null;
+  if (!keepValue) hrBpm = null;
 }
 
-// HR sample tick (peak detector + dynamic threshold)
+// HR sample tick
 function hrTick() {
   var bus = getBus();
   if (!bus || !hrOn) return;
@@ -116,9 +112,10 @@ function hrTick() {
   var v = hrReadCH0(bus);
   hrRaw = v;
 
-  // Moving average DC removal + MAD-like threshold
   if (hrFilled < HR_WIN) {
-    hrBuf[hrI] = v; hrSum += v; hrFilled++;
+    hrBuf[hrI] = v;
+    hrSum += v;
+    hrFilled++;
     hrAbsBuf[hrI] = 0;
   } else {
     hrSum -= hrBuf[hrI];
@@ -154,8 +151,8 @@ function hrTick() {
       if (hrLastBeat) {
         var inst = 60000 / (now - hrLastBeat);
         if (inst >= 40 && inst <= 200) {
-          // smooth
-          hrBpm = hrBpm ? (0.85 * hrBpm + 0.15 * inst) : inst;
+          // Faster response than the old 0.85/0.15 smoothing
+          hrBpm = hrBpm ? (0.7 * hrBpm + 0.3 * inst) : inst;
           hrBpm = hrBpm | 0;
         }
       }
@@ -168,7 +165,6 @@ function hrTick() {
   hrPrevAc = ac;
 }
 
-// Start/stop HR loop cleanly (no reboot required)
 function hrStartLoop() {
   if (hrTickId) return;
   if (!hrEnable()) return;
@@ -181,9 +177,13 @@ function hrStartLoop() {
   hrTickId = setInterval(hrTick, HR_FS_MS);
 }
 
-function hrStopLoop() {
-  if (hrTickId) { clearInterval(hrTickId); hrTickId = 0; }
-  hrDisable();
+// keepValue=true keeps the last HR displayed after stop
+function hrStopLoop(keepValue) {
+  if (hrTickId) {
+    clearInterval(hrTickId);
+    hrTickId = 0;
+  }
+  hrDisable(keepValue);
 }
 
 // ----------------------
@@ -194,40 +194,40 @@ var lastLine = "";
 function draw(force) {
   var now = Date.now();
   var elapsed = acc + (running ? (now - t0) : 0);
+
   var line1 = fmt(elapsed);
-
   var line2 = hrBpm ? ("HR " + hrBpm) : "HR --";
+  var line3 = running ? "RUNNING" : "STOPPED";
 
-  var combined = line1 + "|" + line2 + "|" + (running ? "R" : "S");
+  var combined = line1 + "\n" + line2 + "\n" + line3;
   if (!force && combined === lastLine) return;
   lastLine = combined;
 
   var W = (G.getWidth ? G.getWidth() : 240);
   var H = (G.getHeight ? G.getHeight() : 240);
 
-  // explicit background fill (avoid clear() ambiguity)
+  // Explicit background fill
   G.setColor(0, 0);
   G.fillRect(0, 0, W - 1, H - 1);
 
-  // Time
+  // Everything in white
   G.setColor(1, 15);
+
+  // Time
   G.setFont("Vector", 60);
   G.drawString(line1, (W - G.stringWidth(line1)) / 2, 65);
 
   // Status
   G.setFont("Vector", 18);
-  var st = running ? "RUNNING" : "STOPPED";
-  G.drawString(st, (W - G.stringWidth(st)) / 2, 135);
+  G.drawString(line3, (W - G.stringWidth(line3)) / 2, 135);
 
   // HR
   G.setFont("Vector", 24);
-  G.setColor(1, 14);
   G.drawString(line2, (W - G.stringWidth(line2)) / 2, 165);
 
   // Hint
   G.setFont("Vector", 14);
-  G.setColor(1, 13);
-  var hint = running ? "TAP: STOP   LONG: (no reset)" : "TAP: START   LONG: RESET";
+  var hint = running ? "TAP: STOP   SWIPE: EXIT" : "TAP: START   LONG: RESET";
   G.drawString(hint, (W - G.stringWidth(hint)) / 2, 205);
 
   G.flip();
@@ -235,7 +235,19 @@ function draw(force) {
 
 function drawLoop() {
   draw(false);
-  drawTid = setTimeout(drawLoop, 100); // 10 fps for centiseconds
+  // slower redraw than before (was 100ms)
+  drawTid = setTimeout(drawLoop, 250);
+}
+
+// ----------------------
+// Cleanup
+// ----------------------
+function stopAll(keepHrValue) {
+  if (drawTid) {
+    clearTimeout(drawTid);
+    drawTid = 0;
+  }
+  hrStopLoop(keepHrValue);
 }
 
 // ----------------------
@@ -247,9 +259,8 @@ function startSW() {
   t0 = Date.now();
   if (buzzer && buzzer.sys) buzzer.sys(80);
 
-  // Start HR loop when stopwatch starts (cardio session)
+  // Start HR only while timing
   hrStartLoop();
-
   draw(true);
 }
 
@@ -258,20 +269,21 @@ function stopSW() {
   acc += (Date.now() - t0);
   running = 0;
   if (buzzer && buzzer.sys) buzzer.sys([80, 120, 80]);
-  draw(true);
 
-  // Optional: keep HR running while you view results
-  // If you want HR to stop immediately when stopped, uncomment:
-  // hrStopLoop();
+  // Stop HR when stopped, but keep last value displayed
+  hrStopLoop(true);
+  draw(true);
 }
 
 function resetSW() {
-  // Only allow reset when stopped (prevents accidental reset mid-session)
+  // Only allow reset when stopped
   if (running) {
     if (buzzer && buzzer.sys) buzzer.sys(40);
     return;
   }
-  acc = 0; t0 = 0;
+  acc = 0;
+  t0 = 0;
+  hrBpm = null; // clear displayed HR on reset
   if (buzzer && buzzer.sys) buzzer.sys([100, 50, 80]);
   draw(true);
 }
@@ -283,12 +295,15 @@ face[0] = {
   offms: 600000, // 10 minutes
 
   init: function () {
-    running = 0; acc = 0; t0 = 0;
-    lastLine = "";
+    // Defensive cleanup in case the app was exited badly before
+    stopAll(false);
 
-    // Start HR loop immediately so BPM is ready when you start (optional)
-    // Comment out if you only want HR when stopwatch is running:
-    hrStartLoop();
+    running = 0;
+    acc = 0;
+    t0 = 0;
+    lastLine = "";
+    ignoreTapUntil = 0;
+    hrBpm = null;
 
     draw(true);
     drawLoop();
@@ -296,37 +311,54 @@ face[0] = {
   },
 
   show: function () {
-    // keep awake while running
     if (running && touchHandler && touchHandler.timeout) touchHandler.timeout();
     return 1;
   },
 
   clear: function () {
-    if (drawTid >= 0) clearTimeout(drawTid);
-    drawTid = -1;
-
-    // Stop HR + power down LED when leaving app
-    hrStopLoop();
-
+    stopAll(false);
     return 1;
   },
 
   off: function () {
     G.off();
-    this.clear();
+    stopAll(false);
   }
 };
 
-// Touch events: same model as calc (tap=e==5, long=e==12, swipe down=e==1) [3](https://files.pine64.org/doc/datasheet/pinetime/HRS3300%20Heart%20Rate%20Sensor.pdf)
+// Touch:
+// e==5 tap
+// e==12 long press
+// e==1 swipe down/back
 touchHandler[0] = function (e, x, y) {
-  if (e == 5) {
-    if (running) stopSW();
-    else startSW();
-  } else if (e == 12) {
-    resetSW(); // only resets when stopped
-  } else if (e == 1) {
+  var now = Date.now();
+
+  if (e == 1) {
+    // Swipe down exits, like calculator-style navigation
+    stopAll(false);
+    ignoreTapUntil = now + 500; // ignore any follow-up tap noise
     face.go("main", 0);
     return;
+  }
+
+  if (e == 12) {
+    // Long press reset only when stopped
+    resetSW();
+    // Suppress the "tap" that often follows a long press
+    ignoreTapUntil = now + 800;
+    this.timeout();
+    return;
+  }
+
+  if (e == 5) {
+    // Ignore synthetic / follow-up tap after long press or exit
+    if (now < ignoreTapUntil) {
+      this.timeout();
+      return;
+    }
+
+    if (running) stopSW();
+    else startSW();
   }
 
   this.timeout();

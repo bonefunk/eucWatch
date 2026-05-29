@@ -60,6 +60,13 @@ function fmt(ms) {
          (ss < 10 ? "0" : "") + ss;
 }
 
+function updateAwake() {
+  if (running)
+    face[0].offms = 86400000;
+  else
+    face[0].offms = 600000;
+}
+
 // Use only the handler-provided i2c bus.
 // Your earlier version fell back to I2C1 as well, but that path is not reliable
 function getBus() {
@@ -277,6 +284,7 @@ function hardCleanup(clearHrValue) {
 function startSW() {
   if (running) return;
   running = 1;
+  updateAwake();
   t0 = Date.now();
 
   if (buzzer && buzzer.sys) buzzer.sys(80);
@@ -291,6 +299,7 @@ function stopSW() {
 
   acc += (Date.now() - t0);
   running = 0;
+  updateAwake();
 
   if (buzzer && buzzer.sys) buzzer.sys([80, 120, 80]);
 
@@ -332,6 +341,7 @@ face[0] = {
     hrBpm = null;
     lastLine = "";
     ignoreTapUntil = 0;
+    updateAwake();
 
     draw(true);
     drawLoop();

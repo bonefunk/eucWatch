@@ -8,6 +8,7 @@
 // - guaranteed single timer loop
 // - safer long-press behavior
 // - no accidental reset while running
+// - after countdown finishes, auto-timeout after ~10 seconds if untouched
 
 var T = 180;   // total countdown seconds
 var R = 180;   // remaining seconds
@@ -25,14 +26,11 @@ var ignoreTapUntil = 0;
 // ----------------------
 
 function X() {
-
-  // stop timer loop
   if (I >= 0) {
     clearTimeout(I);
     I = -1;
   }
 
-  // fully reset runtime state
   A = 0;
 }
 
@@ -41,10 +39,8 @@ function X() {
 // ----------------------
 
 function F() {
-
   var m = (R / 60) | 0;
   var s = R % 60;
-
   var t = m + ":" + ("0" + s).substr(-2);
 
   var W = (G.getWidth ? G.getWidth() : 240);
@@ -57,15 +53,12 @@ function F() {
   // all-white display
   G.setColor(1, 15);
 
-  // main countdown
   G.setFont("Vector", 60);
   G.drawString(t, (W - G.stringWidth(t)) / 2, 70);
 
-  // status line
   G.setFont("Vector", 20);
 
   var status;
-
   if (A)
     status = "RUN";
   else if (R < T)
@@ -75,11 +68,9 @@ function F() {
 
   G.drawString(status, (W - G.stringWidth(status)) / 2, 160);
 
-  // hint line
   G.setFont("Vector", 14);
 
   var hint;
-
   if (A)
     hint = "TIMER RUNNING";
   else
@@ -99,43 +90,28 @@ function B(x) {
     buzzer.sys(x);
 }
 
-// race countdown cues
 function C() {
-
   if (R == 180) {
-
     B(700);
-
   } else if (R == 120) {
-
     B([180,120,180]);
-
   } else if (R == 60) {
-
     B(700);
-
   } else if (R == 30) {
-
     B(250);
-
   } else if (R <= 10 && R > 0) {
-
     B(120);
-
   } else if (R == 0) {
-
     B([800,250,800]);
   }
 }
 
 // align updates to next second boundary
 function N() {
-
   if (!A)
     return 1000;
 
   var e = Date.now() - S;
-
   var d = 1000 - (e % 1000);
 
   if (d < 20)
@@ -145,11 +121,25 @@ function N() {
 }
 
 // ----------------------
-// Stopwatch controls
+// Timer controls
 // ----------------------
 
-function startTimer() {
+function setRunAwake() {
+  // keep awake during countdown
+  face[0].offms = 300000; // 5 min
+}
 
+function setDoneAwake() {
+  // after finish, shut off quickly if untouched
+  face[0].offms = 10000; // 10 sec
+}
+
+function setIdleAwake() {
+  // before timer starts / after manual reset
+  face[0].offms = 300000; // 5 min
+}
+
+function startTimer() {
   if (A)
     return;
 
@@ -157,23 +147,23 @@ function startTimer() {
   S = Date.now();
   A = 1;
 
+  setRunAwake();
+
   C();
   F();
 }
 
 function resetTimer() {
-
   // only allow reset while stopped
   if (A) {
-
     B(40);
     return;
   }
 
   R = T;
+  setIdleAwake();
 
   B([100,50,80]);
-
   F();
 }
 
@@ -186,14 +176,13 @@ face[0] = {
   offms: 300000,
 
   init: function () {
-
-    // defensive cleanup
     X();
 
     R = T;
     S = Date.now();
     ignoreTapUntil = 0;
 
+    setIdleAwake();
     F();
 
     return 1;
@@ -212,18 +201,26 @@ face[0] = {
         n = 0;
 
       if (n != R) {
-
         R = n;
-
         C();
         F();
       }
 
-      if (R == 0)
+      if (R == 0) {
         A = 0;
+
+        // after the gun, allow only ~10 seconds before auto-off
+        setDoneAwake();
+
+        // reset the inactivity timer starting NOW
+        if (touchHandler.timeout)
+          touchHandler.timeout();
+
+        F();
+      }
     }
 
-    // ensure only one active timer loop exists
+    // guarantee only one loop exists
     if (I >= 0)
       clearTimeout(I);
 
@@ -233,17 +230,13 @@ face[0] = {
   },
 
   clear: function () {
-
     X();
-
     return 1;
   },
 
   off: function () {
-
-    G.off();
-
     X();
+    G.off();
   }
 };
 
@@ -251,24 +244,18 @@ face[0] = {
 // Touch handling
 // ----------------------
 //
-// eucWatch touch model follows the same general
-// pattern used by calculator:
-//
 // e==5  tap
 // e==12 long press
 // e==1  swipe down
 //
-// Swipe is intentionally ignored here because
-// swipe behavior was unreliable on this build
+// Swipe is intentionally ignored.
+// Side button is the supported exit path.
 
 touchHandler[0] = function (e, x, y) {
-
   var now = Date.now();
 
   // ignore swipe for now
-  // side button is the supported exit path
   if (e == 1) {
-
     this.timeout();
     return;
   }
@@ -276,6 +263,7 @@ touchHandler[0] = function (e, x, y) {
   // long press reset
   if (e == 12) {
 
+    // only reset when stopped
     resetTimer();
 
     // suppress follow-up tap
@@ -290,19 +278,14 @@ touchHandler[0] = function (e, x, y) {
 
     // ignore synthetic tap after long press
     if (now < ignoreTapUntil) {
-
       this.timeout();
       return;
     }
 
     // start only if idle
     if (!A) {
-
       startTimer();
-
     } else {
-
-      // optional tiny feedback when tap ignored
       B(40);
     }
   }

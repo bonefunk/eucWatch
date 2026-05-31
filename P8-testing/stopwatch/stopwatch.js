@@ -1,7 +1,7 @@
 // stopwatch.js
 // Cardio stopwatch with HRS3300 heart-rate (eucWatch / P8 / P22)
 //
-// Less-conservative HR version:
+// Balanced HR version:
 // - H:MM:SS display
 // - all-white text
 // - side button is the supported exit path
@@ -9,7 +9,9 @@
 // - HR only while stopwatch is running
 // - aggressive cleanup on exit
 // - redraws synchronized to exact second boundaries
-// - less strict HR acceptance so BPM actually displays
+// - EMA baseline + smoothing
+// - stricter valley-to-peak beat detection
+// - requires 2+ plausible intervals before displaying BPM
 
 var G = w.gfx;
 
@@ -37,21 +39,25 @@ var hrTickId = 0;
 var hrBpm = null;      // displayed BPM
 var hrRaw = 0;
 
-// HRS3300 sampling cadence
+// Sensor cadence
 var HR_FS_MS = 40; // 25 Hz
 
 // Plausible interval limits
-var HR_MIN_IBI = 280;   // ~214 bpm max
-var HR_MAX_IBI = 1600;  // 37 bpm min
+var HR_MIN_IBI = 320;   // ~187 bpm max
+var HR_MAX_IBI = 1500;  // 40 bpm min
 
 // EMA coefficients
-var HR_BASELINE_ALPHA = 0.020;  // faster baseline tracking
-var HR_SMOOTH_ALPHA   = 0.40;   // more responsive smoothing
-var HR_AMP_ALPHA      = 0.18;   // amplitude adapts faster
+var HR_BASELINE_ALPHA = 0.015;
+var HR_SMOOTH_ALPHA   = 0.30;
+var HR_AMP_ALPHA      = 0.10;
 
-// Beat acceptance (less conservative)
-var HR_MIN_AMP = 10;
-var HR_AMP_MUL = 0.60;
+// Beat acceptance
+var HR_MIN_AMP = 20;
+var HR_AMP_MUL = 1.05;
+
+// RR handling
+var HR_RR_BUF_N = 4;
+var HR_RR_SPREAD_MAX = 1.35; // tighter consistency than the loose version
 
 // Filter / detector state
 var hrBaseline = 0;
@@ -65,18 +71,18 @@ var hrValley = 0;
 var hrHaveValley = 0;
 
 var hrLastBeat = 0;
-var hrLastIBI = 800; // seed at ~75 bpm
+var hrLastIBI = 850; // seed around 70 bpm
 var hrLastReliableAt = 0;
+
+// RR history
+var hrRR = [];
 
 // ----------------------
 // Helpers
 // ----------------------
 
-// H:MM:SS with single-digit hours
 function fmt(ms) {
-
-  if (ms < 0)
-    ms = 0;
+  if (ms < 0) ms = 0;
 
   var total = (ms / 1000) | 0;
 
@@ -89,7 +95,6 @@ function fmt(ms) {
          (ss < 10 ? "0" : "") + ss;
 }
 
-// Keep the watch awake while running
 function updateAwake() {
   if (running)
     face[0].offms = 86400000; // 24h while running
@@ -97,14 +102,11 @@ function updateAwake() {
     face[0].offms = 600000;   // 10m while stopped
 }
 
-// Align redraws to exact second boundaries
 function nextSecondDelay() {
-
   if (!running)
     return 1000;
 
   var e = acc + (Date.now() - t0);
-
   var d = 1000 - (e % 1000);
 
   if (d < 20)
@@ -113,9 +115,7 @@ function nextSecondDelay() {
   return d + 5;
 }
 
-// Use handler-provided i2c bus only
 function getBus() {
-
   if (typeof i2c !== "undefined" &&
       i2c &&
       i2c.writeTo &&
@@ -135,7 +135,6 @@ function hrWriteReg(bus, reg, val) {
 }
 
 function hrReadCH0(bus) {
-
   var m = hrReadReg(bus, 0x09);
   var h = hrReadReg(bus, 0x0A);
   var l = hrReadReg(bus, 0x0F);
@@ -150,7 +149,6 @@ function hrReadCH0(bus) {
 // ----------------------
 
 function hrEnable() {
-
   var bus = getBus();
   if (!bus)
     return false;
@@ -160,6 +158,7 @@ function hrEnable() {
   if (id !== 0x21)
     return false;
 
+  // Working config you already verified
   hrWriteReg(bus, 0x0C, 0x68); // PON + driver
   hrWriteReg(bus, 0x16, 0x66); // resolution
   hrWriteReg(bus, 0x17, 0x10); // gain
@@ -170,7 +169,6 @@ function hrEnable() {
 }
 
 function hrDisable(clearValue) {
-
   var bus = getBus();
 
   if (bus) {
@@ -185,7 +183,6 @@ function hrDisable(clearValue) {
 }
 
 function hrResetState(clearValue) {
-
   hrRaw = 0;
 
   hrBaseline = 0;
@@ -199,35 +196,82 @@ function hrResetState(clearValue) {
   hrHaveValley = 0;
 
   hrLastBeat = 0;
-  hrLastIBI = 800;
+  hrLastIBI = 850;
   hrLastReliableAt = 0;
+
+  hrRR = [];
 
   if (clearValue)
     hrBpm = null;
+}
+
+function hrPushRR(ibi) {
+  hrRR.push(ibi);
+  if (hrRR.length > HR_RR_BUF_N)
+    hrRR.shift();
+}
+
+function median3(a, b, c) {
+  if ((a <= b && b <= c) || (c <= b && b <= a)) return b;
+  if ((b <= a && a <= c) || (c <= a && a <= b)) return a;
+  return c;
+}
+
+function hrUpdateDisplayFromRR(now) {
+  if (hrRR.length < 2)
+    return;
+
+  // Need at least 2 plausible intervals before showing anything
+  if (hrRR.length == 2) {
+    var avg2 = (hrRR[0] + hrRR[1]) / 2;
+    var bpm2 = 60000 / avg2;
+
+    if (bpm2 >= 40 && bpm2 <= 200) {
+      hrBpm = hrBpm ? ((0.80 * hrBpm) + (0.20 * bpm2)) : bpm2;
+      hrBpm = hrBpm | 0;
+      hrLastReliableAt = now;
+    }
+    return;
+  }
+
+  // For 3+ intervals, require moderate consistency
+  var min = hrRR[0];
+  var max = hrRR[0];
+  var sum = 0;
+  var i;
+
+  for (i = 0; i < hrRR.length; i++) {
+    if (hrRR[i] < min) min = hrRR[i];
+    if (hrRR[i] > max) max = hrRR[i];
+    sum += hrRR[i];
+  }
+
+  if ((max / min) > HR_RR_SPREAD_MAX)
+    return;
+
+  var bpm;
+
+  // Use median of the newest 3 intervals if possible
+  if (hrRR.length >= 3) {
+    var n = hrRR.length;
+    var med = median3(hrRR[n-1], hrRR[n-2], hrRR[n-3]);
+    bpm = 60000 / med;
+  } else {
+    bpm = 60000 / (sum / hrRR.length);
+  }
+
+  if (bpm >= 40 && bpm <= 200) {
+    hrBpm = hrBpm ? ((0.80 * hrBpm) + (0.20 * bpm)) : bpm;
+    hrBpm = hrBpm | 0;
+    hrLastReliableAt = now;
+  }
 }
 
 // ----------------------
 // HR processing
 // ----------------------
 
-function hrAcceptBeat(now, ibi) {
-
-  // immediate BPM update after first valid interval
-  var instBpm = 60000 / ibi;
-
-  if (instBpm >= 40 && instBpm <= 200) {
-
-    // smooth, but not too sluggish
-    hrBpm = hrBpm ? ((0.55 * hrBpm) + (0.45 * instBpm)) : instBpm;
-    hrBpm = hrBpm | 0;
-
-    hrLastReliableAt = now;
-    hrLastIBI = ibi;
-  }
-}
-
 function hrTick() {
-
   var bus = getBus();
   if (!bus || !hrOn)
     return;
@@ -258,13 +302,13 @@ function hrTick() {
 
   var now = Date.now();
 
-  // track valley continuously
+  // Track valley continuously
   if (!hrHaveValley || hrFilt < hrValley) {
     hrValley = hrFilt;
     hrHaveValley = 1;
   }
 
-  // local peak at hrPrev1
+  // Local peak at hrPrev1
   if (hrPrev1 > hrPrev2 && hrPrev1 >= hrFilt) {
 
     var peak = hrPrev1;
@@ -274,31 +318,34 @@ function hrTick() {
     if (amp > dynAmpThr) {
 
       if (!hrLastBeat) {
-
         // first plausible beat primes detector
         hrLastBeat = now;
-
       } else {
 
         var ibi = now - hrLastBeat;
 
-        // dynamic refractory: require at least ~45% of last interval
-        var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.45);
+        // Dynamic refractory:
+        // require at least 60% of previous interval
+        var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.60);
 
         if (ibi >= minDynamicIBI && ibi <= HR_MAX_IBI) {
           hrLastBeat = now;
-          hrAcceptBeat(now, ibi);
+          hrLastIBI = ibi;
 
-          // reset valley after accepted beat
+          hrPushRR(ibi);
+          hrUpdateDisplayFromRR(now);
+
+          // Reset valley after accepted beat so next beat needs a fresh rise
           hrValley = hrFilt;
         }
       }
     }
   }
 
-  // if nothing reliable for a while, blank the display
-  if (hrLastReliableAt && (now - hrLastReliableAt) > 12000) {
+  // Hold last BPM longer before blanking
+  if (hrLastReliableAt && (now - hrLastReliableAt) > 15000) {
     hrBpm = null;
+    hrRR = [];
     hrLastReliableAt = 0;
   }
 
@@ -307,7 +354,6 @@ function hrTick() {
 }
 
 function hrStartLoop() {
-
   if (hrTickId)
     return;
 
@@ -320,7 +366,6 @@ function hrStartLoop() {
 }
 
 function hrStopLoop(clearValue) {
-
   if (hrTickId) {
     clearInterval(hrTickId);
     hrTickId = 0;
@@ -334,7 +379,6 @@ function hrStopLoop(clearValue) {
 // ----------------------
 
 function draw(force) {
-
   var now = Date.now();
   var elapsed = acc + (running ? (now - t0) : 0);
 
@@ -355,7 +399,7 @@ function draw(force) {
   G.setColor(0, 0);
   G.fillRect(0, 0, W - 1, H - 1);
 
-  // all white text
+  // all-white text
   G.setColor(1, 15);
 
   // main time
@@ -379,7 +423,6 @@ function draw(force) {
 }
 
 function drawLoop() {
-
   draw(false);
 
   if (drawTid)
@@ -397,7 +440,6 @@ function drawLoop() {
 // ----------------------
 
 function hardCleanup(clearHrValue) {
-
   if (drawTid) {
     clearTimeout(drawTid);
     drawTid = 0;
@@ -420,7 +462,6 @@ function hardCleanup(clearHrValue) {
 // ----------------------
 
 function startSW() {
-
   if (running)
     return;
 
@@ -438,7 +479,6 @@ function startSW() {
 }
 
 function stopSW() {
-
   if (!running)
     return;
 
@@ -455,7 +495,6 @@ function stopSW() {
 }
 
 function resetSW() {
-
   if (running) {
     if (buzzer && buzzer.sys)
       buzzer.sys(40);
@@ -480,7 +519,6 @@ face[0] = {
   offms: 600000,
 
   init: function () {
-
     hardCleanup(true);
 
     running = 0;
@@ -497,7 +535,6 @@ face[0] = {
   },
 
   show: function () {
-
     if (running && touchHandler && touchHandler.timeout)
       touchHandler.timeout();
 
@@ -520,7 +557,6 @@ face[0] = {
 // ----------------------
 
 touchHandler[0] = function (e, x, y) {
-
   var now = Date.now();
 
   // swipe ignored for now
@@ -539,7 +575,6 @@ touchHandler[0] = function (e, x, y) {
 
   // tap start/stop
   if (e == 5) {
-
     if (now < ignoreTapUntil) {
       this.timeout();
       return;

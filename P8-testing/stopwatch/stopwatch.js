@@ -1,20 +1,15 @@
 // stopwatch.js
 // Cardio stopwatch with HRS3300 heart-rate (eucWatch / P8 / P22)
 //
-// This version includes:
-// - H:MM:SS display (single-digit hours)
+// Less-conservative HR version:
+// - H:MM:SS display
 // - all-white text
 // - side button is the supported exit path
-// - swipe ignored for now
+// - swipe ignored
 // - HR only while stopwatch is running
 // - aggressive cleanup on exit
 // - redraws synchronized to exact second boundaries
-// - no redraw loop while stopped
-// - Option A HR processing:
-//   * slow EMA baseline removal
-//   * short EMA smoothing
-//   * valley-to-peak beat detection
-//   * less strict RR gating so BPM actually displays
+// - less strict HR acceptance so BPM actually displays
 
 var G = w.gfx;
 
@@ -42,23 +37,21 @@ var hrTickId = 0;
 var hrBpm = null;      // displayed BPM
 var hrRaw = 0;
 
-// HRS3300 runs well at 25 Hz sampling cadence
+// HRS3300 sampling cadence
 var HR_FS_MS = 40; // 25 Hz
 
 // Plausible interval limits
-var HR_MIN_IBI = 300;   // ~200 bpm max
-var HR_MAX_IBI = 1500;  // 40 bpm min
+var HR_MIN_IBI = 280;   // ~214 bpm max
+var HR_MAX_IBI = 1600;  // 37 bpm min
 
 // EMA coefficients
-var HR_BASELINE_ALPHA = 0.015;  // slow baseline tracking (~2–4 sec feel)
-var HR_SMOOTH_ALPHA   = 0.35;   // short smoothing
-var HR_AMP_ALPHA      = 0.12;   // envelope adaptation
+var HR_BASELINE_ALPHA = 0.020;  // faster baseline tracking
+var HR_SMOOTH_ALPHA   = 0.40;   // more responsive smoothing
+var HR_AMP_ALPHA      = 0.18;   // amplitude adapts faster
 
-// Beat acceptance
-var HR_MIN_AMP = 18;
-var HR_AMP_MUL = 0.85;
-var HR_RR_BUF_N = 4;
-var HR_RR_SPREAD_MAX = 1.60; // allow moderate variability
+// Beat acceptance (less conservative)
+var HR_MIN_AMP = 10;
+var HR_AMP_MUL = 0.60;
 
 // Filter / detector state
 var hrBaseline = 0;
@@ -72,10 +65,7 @@ var hrValley = 0;
 var hrHaveValley = 0;
 
 var hrLastBeat = 0;
-var hrLastAcceptedPeak = 0;
-
-// RR history
-var hrRR = [];
+var hrLastIBI = 800; // seed at ~75 bpm
 var hrLastReliableAt = 0;
 
 // ----------------------
@@ -99,7 +89,7 @@ function fmt(ms) {
          (ss < 10 ? "0" : "") + ss;
 }
 
-// Keep the watch awake while running, normal timeout while stopped
+// Keep the watch awake while running
 function updateAwake() {
   if (running)
     face[0].offms = 86400000; // 24h while running
@@ -117,7 +107,6 @@ function nextSecondDelay() {
 
   var d = 1000 - (e % 1000);
 
-  // avoid tiny near-zero redraw delays
   if (d < 20)
     d += 1000;
 
@@ -145,7 +134,6 @@ function hrWriteReg(bus, reg, val) {
   bus.writeTo(HR_ADDR, reg, val);
 }
 
-// CH0 raw sample assembly
 function hrReadCH0(bus) {
 
   var m = hrReadReg(bus, 0x09);
@@ -172,7 +160,6 @@ function hrEnable() {
   if (id !== 0x21)
     return false;
 
-  // Verified working config on your watch
   hrWriteReg(bus, 0x0C, 0x68); // PON + driver
   hrWriteReg(bus, 0x16, 0x66); // resolution
   hrWriteReg(bus, 0x17, 0x10); // gain
@@ -212,72 +199,32 @@ function hrResetState(clearValue) {
   hrHaveValley = 0;
 
   hrLastBeat = 0;
-  hrLastAcceptedPeak = 0;
-
-  hrRR = [];
+  hrLastIBI = 800;
   hrLastReliableAt = 0;
 
   if (clearValue)
     hrBpm = null;
 }
 
-function hrPushRR(ibi) {
+// ----------------------
+// HR processing
+// ----------------------
 
-  hrRR.push(ibi);
+function hrAcceptBeat(now, ibi) {
 
-  if (hrRR.length > HR_RR_BUF_N)
-    hrRR.shift();
-}
+  // immediate BPM update after first valid interval
+  var instBpm = 60000 / ibi;
 
-// Display BPM sooner and more reliably than the first strict Option A version
-function hrUpdateDisplayFromRR() {
+  if (instBpm >= 40 && instBpm <= 200) {
 
-  if (hrRR.length < 2)
-    return;
-
-  // Show provisional BPM once we have 2 plausible intervals
-  if (hrRR.length == 2) {
-
-    var quickAvg = (hrRR[0] + hrRR[1]) / 2;
-    var quickBpm = 60000 / quickAvg;
-
-    if (quickBpm >= 40 && quickBpm <= 200) {
-      hrBpm = hrBpm ? ((0.7 * hrBpm) + (0.3 * quickBpm)) : quickBpm;
-      hrBpm = hrBpm | 0;
-      hrLastReliableAt = Date.now();
-    }
-
-    return;
-  }
-
-  // With 3+ intervals, require only moderate consistency
-  var min = hrRR[0];
-  var max = hrRR[0];
-  var sum = 0;
-  var i;
-
-  for (i = 0; i < hrRR.length; i++) {
-    if (hrRR[i] < min) min = hrRR[i];
-    if (hrRR[i] > max) max = hrRR[i];
-    sum += hrRR[i];
-  }
-
-  if ((max / min) > HR_RR_SPREAD_MAX)
-    return;
-
-  var avg = sum / hrRR.length;
-  var bpm = 60000 / avg;
-
-  if (bpm >= 40 && bpm <= 200) {
-    hrBpm = hrBpm ? ((0.75 * hrBpm) + (0.25 * bpm)) : bpm;
+    // smooth, but not too sluggish
+    hrBpm = hrBpm ? ((0.55 * hrBpm) + (0.45 * instBpm)) : instBpm;
     hrBpm = hrBpm | 0;
-    hrLastReliableAt = Date.now();
+
+    hrLastReliableAt = now;
+    hrLastIBI = ibi;
   }
 }
-
-// ----------------------
-// Option A HR processing
-// ----------------------
 
 function hrTick() {
 
@@ -311,51 +258,47 @@ function hrTick() {
 
   var now = Date.now();
 
-  // track local valley continuously
+  // track valley continuously
   if (!hrHaveValley || hrFilt < hrValley) {
     hrValley = hrFilt;
     hrHaveValley = 1;
   }
 
-  // 3-point local peak test:
-  // peak occurs at hrPrev1 if hrPrev1 > hrPrev2 and hrPrev1 >= hrFilt
+  // local peak at hrPrev1
   if (hrPrev1 > hrPrev2 && hrPrev1 >= hrFilt) {
 
     var peak = hrPrev1;
     var amp = peak - hrValley;
     var dynAmpThr = Math.max(HR_MIN_AMP, hrAmpEma * HR_AMP_MUL);
 
-    // accept only if valley->peak amplitude is strong enough
     if (amp > dynAmpThr) {
 
       if (!hrLastBeat) {
 
-        // first plausible beat primes the detector
+        // first plausible beat primes detector
         hrLastBeat = now;
-        hrLastAcceptedPeak = peak;
 
       } else {
 
         var ibi = now - hrLastBeat;
 
-        if (ibi >= HR_MIN_IBI && ibi <= HR_MAX_IBI) {
+        // dynamic refractory: require at least ~45% of last interval
+        var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.45);
+
+        if (ibi >= minDynamicIBI && ibi <= HR_MAX_IBI) {
           hrLastBeat = now;
-          hrLastAcceptedPeak = peak;
+          hrAcceptBeat(now, ibi);
 
-          hrPushRR(ibi);
-          hrUpdateDisplayFromRR();
-
-          // reset valley after accepted beat so next beat needs a fresh rise
+          // reset valley after accepted beat
           hrValley = hrFilt;
         }
       }
     }
   }
 
-  // if we haven't had a reliable update in a while, blank the display
-  if (hrLastReliableAt && (now - hrLastReliableAt) > 8000) {
+  // if nothing reliable for a while, blank the display
+  if (hrLastReliableAt && (now - hrLastReliableAt) > 12000) {
     hrBpm = null;
-    hrRR = [];
     hrLastReliableAt = 0;
   }
 
@@ -435,7 +378,6 @@ function draw(force) {
   G.flip();
 }
 
-// redraw loop synchronized to second boundaries
 function drawLoop() {
 
   draw(false);
@@ -443,7 +385,6 @@ function drawLoop() {
   if (drawTid)
     clearTimeout(drawTid);
 
-  // no redraw loop while stopped
   if (running) {
     drawTid = setTimeout(drawLoop, nextSecondDelay());
   } else {
@@ -457,24 +398,19 @@ function drawLoop() {
 
 function hardCleanup(clearHrValue) {
 
-  // stop draw loop
   if (drawTid) {
     clearTimeout(drawTid);
     drawTid = 0;
   }
 
-  // stop HR
   hrStopLoop(clearHrValue);
 
-  // reset stopwatch state
   running = 0;
   t0 = 0;
   acc = 0;
 
-  // reset HR estimator
   hrResetState(clearHrValue);
 
-  // reset UI state
   lastLine = "";
   ignoreTapUntil = Date.now() + 500;
 }
@@ -495,7 +431,6 @@ function startSW() {
   if (buzzer && buzzer.sys)
     buzzer.sys(80);
 
-  // HR only while timing
   hrStartLoop();
 
   draw(true);
@@ -514,7 +449,6 @@ function stopSW() {
   if (buzzer && buzzer.sys)
     buzzer.sys([80,120,80]);
 
-  // stop HR immediately when stopping
   hrStopLoop(false);
 
   draw(true);
@@ -559,13 +493,11 @@ face[0] = {
     updateAwake();
     draw(true);
 
-    // no draw loop until stopwatch starts
     return 1;
   },
 
   show: function () {
 
-    // keep watch awake while running
     if (running && touchHandler && touchHandler.timeout)
       touchHandler.timeout();
 
@@ -586,33 +518,26 @@ face[0] = {
 // ----------------------
 // Touch handling
 // ----------------------
-//
-// e==5  tap
-// e==12 long press
-// e==1  swipe down
-//
-// Swipe intentionally ignored for now.
-// Side button is the supported exit path.
 
 touchHandler[0] = function (e, x, y) {
 
   var now = Date.now();
 
+  // swipe ignored for now
   if (e == 1) {
     this.timeout();
     return;
   }
 
+  // long press reset
   if (e == 12) {
     resetSW();
-
-    // suppress follow-up tap
     ignoreTapUntil = now + 1200;
-
     this.timeout();
     return;
   }
 
+  // tap start/stop
   if (e == 5) {
 
     if (now < ignoreTapUntil) {

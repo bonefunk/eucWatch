@@ -1,7 +1,7 @@
 // stopwatch.js
 // Cardio stopwatch with HRS3300 heart-rate (eucWatch / P8 / P22)
 //
-// Balanced HR version:
+// This version includes:
 // - H:MM:SS display
 // - all-white text
 // - side button is the supported exit path
@@ -9,9 +9,8 @@
 // - HR only while stopwatch is running
 // - aggressive cleanup on exit
 // - redraws synchronized to exact second boundaries
-// - EMA baseline + smoothing
-// - stricter valley-to-peak beat detection
-// - requires 2+ plausible intervals before displaying BPM
+// - accel wake/raise-to-wake disabled while app is active
+//   and restored on exit
 
 var G = w.gfx;
 
@@ -36,10 +35,10 @@ var HR_ADDR = 0x44;
 var hrOn = 0;
 var hrTickId = 0;
 
-var hrBpm = null;      // displayed BPM
+var hrBpm = null;
 var hrRaw = 0;
 
-// Sensor cadence
+// Sampling cadence
 var HR_FS_MS = 40; // 25 Hz
 
 // Plausible interval limits
@@ -57,7 +56,7 @@ var HR_AMP_MUL = 1.05;
 
 // RR handling
 var HR_RR_BUF_N = 4;
-var HR_RR_SPREAD_MAX = 1.35; // tighter consistency than the loose version
+var HR_RR_SPREAD_MAX = 1.35;
 
 // Filter / detector state
 var hrBaseline = 0;
@@ -115,6 +114,30 @@ function nextSecondDelay() {
   return d + 5;
 }
 
+// ----------------------
+// Accel wake control
+// ----------------------
+
+// The uploaded handlers show that accel wake can directly call face.off()
+// based on wrist orientation, so disable it while this app is active
+
+function suspendAccelWake() {
+  if (typeof acc !== "undefined" && acc && acc.off)
+    acc.off();
+}
+
+function resumeAccelWake() {
+  if (typeof ew !== "undefined" &&
+      ew.do &&
+      ew.do.update &&
+      ew.do.update.acc)
+    ew.do.update.acc();
+}
+
+// ----------------------
+// I2C / sensor access
+// ----------------------
+
 function getBus() {
   if (typeof i2c !== "undefined" &&
       i2c &&
@@ -153,12 +176,10 @@ function hrEnable() {
   if (!bus)
     return false;
 
-  // HRS3300 ID should be 0x21
   var id = hrReadReg(bus, 0x00);
   if (id !== 0x21)
     return false;
 
-  // Working config you already verified
   hrWriteReg(bus, 0x0C, 0x68); // PON + driver
   hrWriteReg(bus, 0x16, 0x66); // resolution
   hrWriteReg(bus, 0x17, 0x10); // gain
@@ -221,7 +242,6 @@ function hrUpdateDisplayFromRR(now) {
   if (hrRR.length < 2)
     return;
 
-  // Need at least 2 plausible intervals before showing anything
   if (hrRR.length == 2) {
     var avg2 = (hrRR[0] + hrRR[1]) / 2;
     var bpm2 = 60000 / avg2;
@@ -234,7 +254,6 @@ function hrUpdateDisplayFromRR(now) {
     return;
   }
 
-  // For 3+ intervals, require moderate consistency
   var min = hrRR[0];
   var max = hrRR[0];
   var sum = 0;
@@ -251,7 +270,6 @@ function hrUpdateDisplayFromRR(now) {
 
   var bpm;
 
-  // Use median of the newest 3 intervals if possible
   if (hrRR.length >= 3) {
     var n = hrRR.length;
     var med = median3(hrRR[n-1], hrRR[n-2], hrRR[n-3]);
@@ -279,7 +297,6 @@ function hrTick() {
   var raw = hrReadCH0(bus);
   hrRaw = raw;
 
-  // initialize baseline on first sample
   if (!hrBaseline) {
     hrBaseline = raw;
     hrFilt = 0;
@@ -290,10 +307,10 @@ function hrTick() {
     return;
   }
 
-  // 1) Slow EMA baseline (DC/drift removal)
+  // 1) Slow EMA baseline
   hrBaseline = hrBaseline + HR_BASELINE_ALPHA * (raw - hrBaseline);
 
-  // 2) Short smoothing EMA on AC component
+  // 2) Short EMA smoothing on AC component
   var ac = raw - hrBaseline;
   hrFilt = hrFilt + HR_SMOOTH_ALPHA * (ac - hrFilt);
 
@@ -335,7 +352,7 @@ function hrTick() {
           hrPushRR(ibi);
           hrUpdateDisplayFromRR(now);
 
-          // Reset valley after accepted beat so next beat needs a fresh rise
+          // Reset valley after accepted beat
           hrValley = hrFilt;
         }
       }
@@ -399,22 +416,17 @@ function draw(force) {
   G.setColor(0, 0);
   G.fillRect(0, 0, W - 1, H - 1);
 
-  // all-white text
   G.setColor(1, 15);
 
-  // main time
   G.setFont("Vector", 46);
   G.drawString(line1, ((W - G.stringWidth(line1)) / 2) + 6, 72);
 
-  // status
   G.setFont("Vector", 18);
   G.drawString(line3, (W - G.stringWidth(line3)) / 2, 135);
 
-  // HR
   G.setFont("Vector", 24);
   G.drawString(line2, (W - G.stringWidth(line2)) / 2, 165);
 
-  // hint
   G.setFont("Vector", 14);
   var hint = running ? "TAP: STOP  BTN: EXIT" : "TAP: START  LONG: RESET";
   G.drawString(hint, (W - G.stringWidth(hint)) / 2, 205);
@@ -519,7 +531,12 @@ face[0] = {
   offms: 600000,
 
   init: function () {
+
     hardCleanup(true);
+
+    // Critical fix for this watch model:
+    // disable accel wake while the stopwatch app is active
+    suspendAccelWake();
 
     running = 0;
     acc = 0;
@@ -543,11 +560,19 @@ face[0] = {
 
   clear: function () {
     hardCleanup(true);
+
+    // Restore user's normal accel behavior
+    resumeAccelWake();
+
     return 1;
   },
 
   off: function () {
     hardCleanup(true);
+
+    // Restore user's normal accel behavior
+    resumeAccelWake();
+
     G.off();
   }
 };
@@ -557,6 +582,7 @@ face[0] = {
 // ----------------------
 
 touchHandler[0] = function (e, x, y) {
+
   var now = Date.now();
 
   // swipe ignored for now
@@ -575,6 +601,7 @@ touchHandler[0] = function (e, x, y) {
 
   // tap start/stop
   if (e == 5) {
+
     if (now < ignoreTapUntil) {
       this.timeout();
       return;

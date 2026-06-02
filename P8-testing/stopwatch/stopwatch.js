@@ -45,14 +45,12 @@ var HR_FS_MS = 40; // 25 Hz
 var HR_MIN_IBI = 320;   // ~187 bpm max
 var HR_MAX_IBI = 1500;  // 40 bpm min
 
-// EMA coefficients
-var HR_BASELINE_ALPHA = 0.015;
-var HR_SMOOTH_ALPHA   = 0.30;
-var HR_AMP_ALPHA      = 0.10;
+// Updated EMA coefficients for a 25Hz (40ms) sample rate
+var HR_BASELINE_ALPHA = 0.08; // ~0.5 Hz cutoff (Removes respiration wander)
+var HR_SMOOTH_ALPHA   = 0.60; // ~4.0 Hz cutoff (Leaves systolic peaks intact)
 
 // Beat acceptance
 var HR_MIN_AMP = 20;
-var HR_AMP_MUL = 1.05;
 
 // RR handling
 var HR_RR_BUF_N = 4;
@@ -304,18 +302,21 @@ function hrTick() {
     hrPrev1 = 0;
     hrValley = 0;
     hrHaveValley = 1;
+    hrAmpEma = HR_MIN_AMP * 2; // Seed the expected amplitude
     return;
   }
 
-  // 1) Slow EMA baseline
+  // 1) DC Removal (High-pass): removes breathing and movement wander
   hrBaseline = hrBaseline + HR_BASELINE_ALPHA * (raw - hrBaseline);
-
-  // 2) Short EMA smoothing on AC component
   var ac = raw - hrBaseline;
+
+  // 2) Noise Removal (Low-pass): smooths out high-frequency sensor noise
   hrFilt = hrFilt + HR_SMOOTH_ALPHA * (ac - hrFilt);
 
-  // 3) Adaptive amplitude estimate
-  hrAmpEma = hrAmpEma + HR_AMP_ALPHA * (Math.abs(hrFilt) - hrAmpEma);
+  // 3) Decay the expected amplitude so the threshold doesn't get stuck high if the pulse weakens
+  // At 25Hz, multiplying by 0.995 decays the threshold by about 12% per second.
+  hrAmpEma *= 0.995;
+  if (hrAmpEma < HR_MIN_AMP) hrAmpEma = HR_MIN_AMP;
 
   var now = Date.now();
 
@@ -325,41 +326,45 @@ function hrTick() {
     hrHaveValley = 1;
   }
 
-  // Local peak at hrPrev1
+  // Local peak detection
   if (hrPrev1 > hrPrev2 && hrPrev1 >= hrFilt) {
 
     var peak = hrPrev1;
     var amp = peak - hrValley;
-    var dynAmpThr = Math.max(HR_MIN_AMP, hrAmpEma * HR_AMP_MUL);
+
+    // The threshold is dynamically set to 50% of the recent average valid peak height
+    var dynAmpThr = Math.max(HR_MIN_AMP, hrAmpEma * 0.50);
 
     if (amp > dynAmpThr) {
 
       if (!hrLastBeat) {
-        // first plausible beat primes detector
+        // First plausible beat primes detector
         hrLastBeat = now;
       } else {
-
         var ibi = now - hrLastBeat;
 
         // Dynamic refractory:
-        // require at least 60% of previous interval
+        // Require at least 60% of previous interval to skip the dicrotic notch
         var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.60);
 
         if (ibi >= minDynamicIBI && ibi <= HR_MAX_IBI) {
           hrLastBeat = now;
           hrLastIBI = ibi;
 
+          // Valid beat confirmed! Update our running peak amplitude expectation
+          hrAmpEma = (hrAmpEma * 0.80) + (amp * 0.20);
+
           hrPushRR(ibi);
           hrUpdateDisplayFromRR(now);
 
-          // Reset valley after accepted beat
+          // Reset valley after accepted beat to prep for the next wave cycle
           hrValley = hrFilt;
         }
       }
     }
   }
 
-  // Hold last BPM longer before blanking
+  // Blanking: hold last BPM longer before clearing
   if (hrLastReliableAt && (now - hrLastReliableAt) > 15000) {
     hrBpm = null;
     hrRR = [];

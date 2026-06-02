@@ -46,8 +46,8 @@ var HR_MIN_IBI = 320;   // ~187 bpm max
 var HR_MAX_IBI = 1500;  // 40 bpm min
 
 // Updated EMA coefficients for a 25Hz (40ms) sample rate
-var HR_BASELINE_ALPHA = 0.08; // ~0.5 Hz cutoff (Removes respiration wander)
-var HR_SMOOTH_ALPHA   = 0.60; // ~4.0 Hz cutoff (Leaves systolic peaks intact)
+var HR_BASELINE_ALPHA = 0.08; // ~0.5 Hz-ish drift removal
+var HR_SMOOTH_ALPHA   = 0.60; // preserves pulse shape but smooths noise
 
 // Beat acceptance
 var HR_MIN_AMP = 20;
@@ -115,9 +115,6 @@ function nextSecondDelay() {
 // ----------------------
 // Accel wake control
 // ----------------------
-
-// The uploaded handlers show that accel wake can directly call face.off()
-// based on wrist orientation, so disable it while this app is active
 
 function suspendAccelWake() {
   if (typeof acc !== "undefined" && acc && acc.off)
@@ -347,18 +344,27 @@ function hrTick() {
         // Require at least 60% of previous interval to skip the dicrotic notch
         var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.60);
 
-        if (ibi >= minDynamicIBI && ibi <= HR_MAX_IBI) {
-          hrLastBeat = now;
-          hrLastIBI = ibi;
-
-          // Valid beat confirmed! Update our running peak amplitude expectation
-          hrAmpEma = (hrAmpEma * 0.80) + (amp * 0.20);
-
-          hrPushRR(ibi);
-          hrUpdateDisplayFromRR(now);
-
-          // Reset valley after accepted beat to prep for the next wave cycle
+        if (ibi >= minDynamicIBI) {
+          
+          // CRITICAL FIX: We are past the refractory period, so this is a new physiological beat.
+          // We MUST resync the timer here so a missed beat doesn't cause a permanent deadlock.
+          hrLastBeat = now; 
+          
+          // Reset valley to prep for the next wave cycle
           hrValley = hrFilt;
+
+          // Only use this interval for BPM calculation if it's an actually contiguous beat
+          if (ibi <= HR_MAX_IBI) {
+            hrLastIBI = ibi;
+
+            // Clamp the amplitude impact to prevent a massive motion artifact 
+            // from permanently deafening the dynamic threshold
+            var safeAmp = Math.min(amp, hrAmpEma * 3);
+            hrAmpEma = (hrAmpEma * 0.80) + (safeAmp * 0.20);
+
+            hrPushRR(ibi);
+            hrUpdateDisplayFromRR(now);
+          }
         }
       }
     }

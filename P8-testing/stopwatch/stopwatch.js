@@ -51,6 +51,7 @@ var HR_SMOOTH_ALPHA   = 0.60; // preserves pulse shape but smooths noise
 
 // Beat acceptance
 var HR_MIN_AMP = 20;
+var hrArmed = 0;
 
 // RR handling
 var HR_RR_BUF_N = 4;
@@ -285,100 +286,96 @@ function hrUpdateDisplayFromRR(now) {
 // ----------------------
 
 function hrTick() {
-  var bus = getBus();
-  if (!bus || !hrOn)
-    return;
+ var bus = getBus();
+ if (!bus || !hrOn)
+   return;
 
-  var raw = hrReadCH0(bus);
-  hrRaw = raw;
+ var raw = hrReadCH0(bus);
+ hrRaw = raw;
 
-  if (!hrBaseline) {
-    hrBaseline = raw;
-    hrFilt = 0;
-    hrPrev2 = 0;
-    hrPrev1 = 0;
-    hrValley = 0;
-    hrHaveValley = 1;
-    hrAmpEma = HR_MIN_AMP * 2; // Seed the expected amplitude
-    return;
-  }
+ if (!hrBaseline) {
+   hrBaseline = raw;
+   hrFilt = 0;
+   hrPrev2 = 0;
+   hrPrev1 = 0;
+   hrValley = 0;
+   hrHaveValley = 1;
+   hrAmpEma = HR_MIN_AMP * 2;
+   hrArmed = 0; // Initialize armed state
+   return;
+ }
 
-  // 1) DC Removal (High-pass): removes breathing and movement wander
-  hrBaseline = hrBaseline + HR_BASELINE_ALPHA * (raw - hrBaseline);
-  var ac = raw - hrBaseline;
+ // 1) DC Removal
+ hrBaseline = hrBaseline + HR_BASELINE_ALPHA * (raw - hrBaseline);
+ var ac = raw - hrBaseline;
 
-  // 2) Noise Removal (Low-pass): smooths out high-frequency sensor noise
-  hrFilt = hrFilt + HR_SMOOTH_ALPHA * (ac - hrFilt);
+ // 2) Noise Removal
+ hrFilt = hrFilt + HR_SMOOTH_ALPHA * (ac - hrFilt);
 
-  // 3) Decay the expected amplitude so the threshold doesn't get stuck high if the pulse weakens
-  // At 25Hz, multiplying by 0.995 decays the threshold by about 12% per second.
-  hrAmpEma *= 0.995;
-  if (hrAmpEma < HR_MIN_AMP) hrAmpEma = HR_MIN_AMP;
+ // 3) Decay the expected amplitude
+ hrAmpEma *= 0.995;
+ if (hrAmpEma < HR_MIN_AMP) hrAmpEma = HR_MIN_AMP;
 
-  var now = Date.now();
+ var now = Date.now();
 
-  // Track valley continuously
-  if (!hrHaveValley || hrFilt < hrValley) {
-    hrValley = hrFilt;
-    hrHaveValley = 1;
-  }
+ // CRITICAL FIX: Arm the detector only when the signal drops below the zero baseline.
+ // This guarantees we are in the "valley" between beats and prevents falling-edge noise from triggering.
+ if (hrFilt < 0) {
+   hrArmed = 1;
+ }
 
-  // Local peak detection
-  if (hrPrev1 > hrPrev2 && hrPrev1 >= hrFilt) {
+ // Track valley continuously
+ if (!hrHaveValley || hrFilt < hrValley) {
+   hrValley = hrFilt;
+   hrHaveValley = 1;
+ }
 
-    var peak = hrPrev1;
-    var amp = peak - hrValley;
+ // Local peak detection
+ if (hrPrev1 > hrPrev2 && hrPrev1 >= hrFilt) {
 
-    // The threshold is dynamically set to 65% of the recent average valid peak height
-    var dynAmpThr = Math.max(HR_MIN_AMP, hrAmpEma * 0.65);
+   var peak = hrPrev1;
+   var amp = peak - hrValley;
+   var dynAmpThr = Math.max(HR_MIN_AMP, hrAmpEma * 0.50);
 
-    if (amp > dynAmpThr) {
+   // Only evaluate the peak if the detector is armed
+   if (hrArmed && amp > dynAmpThr) {
 
-      if (!hrLastBeat) {
-        // First plausible beat primes detector
-        hrLastBeat = now;
-      } else {
-        var ibi = now - hrLastBeat;
+     if (!hrLastBeat) {
+       hrLastBeat = now;
+       hrArmed = 0; // Disarm immediately
+     } else {
+       var ibi = now - hrLastBeat;
+       var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.60);
 
-        // Dynamic refractory:
-        // Require at least 75% of previous interval to skip the dicrotic notch
-        var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.75);
+       if (ibi >= minDynamicIBI) {
 
-        if (ibi >= minDynamicIBI) {
-          
-          // CRITICAL FIX: We are past the refractory period, so this is a new physiological beat.
-          // We MUST resync the timer here so a missed beat doesn't cause a permanent deadlock.
-          hrLastBeat = now; 
-          
-          // Reset valley to prep for the next wave cycle
-          hrValley = hrFilt;
+         hrLastBeat = now;
+         hrValley = hrFilt;
+         hrArmed = 0; // CRITICAL: Disarm until the signal drops below 0 again
 
-          // Only use this interval for BPM calculation if it's an actually contiguous beat
-          if (ibi <= HR_MAX_IBI) {
-            hrLastIBI = ibi;
+         if (ibi <= HR_MAX_IBI) {
+           hrLastIBI = ibi;
 
-            // Clamp the amplitude impact to prevent a massive motion artifact 
-            // from permanently deafening the dynamic threshold
-            var safeAmp = Math.min(amp, hrAmpEma * 3);
-            hrAmpEma = (hrAmpEma * 0.80) + (safeAmp * 0.20);
+           var safeAmp = Math.min(amp, hrAmpEma * 3);
+           hrAmpEma = (hrAmpEma * 0.80) + (safeAmp * 0.20);
 
-            hrPushRR(ibi);
-            hrUpdateDisplayFromRR(now);
-          }
-        }
-      }
-    }
-  }
+           hrPushRR(ibi);
+           hrUpdateDisplayFromRR(now);
+         }
+       }
+     }
+   }
+ }
 
-  // Blanking: hold last BPM longer before clearing
-  if (hrLastReliableAt && (now - hrLastReliableAt) > 15000) {
-    hrBpm = null;
-    hrRR = [];
-    hrLastReliableAt = 0;
-  }
+ // Blanking: hold last BPM longer before clearing
+ if (hrLastReliableAt && (now - hrLastReliableAt) > 15000) {
+   hrBpm = null;
+   hrRR = [];
+   hrLastReliableAt = 0;
+ }
 
-  hrPrev2 = hrPrev1;
-  hrPrev1 = hrFilt;
+ hrPrev2 = hrPrev1;
+ hrPrev1 = hrFilt;
 }
 
 function hrStartLoop() {

@@ -329,8 +329,8 @@ function hrTick() {
     var peak = hrPrev1;
     var amp = peak - hrValley;
 
-    // The threshold is dynamically set to 50% of the recent average valid peak height
-    var dynAmpThr = Math.max(HR_MIN_AMP, hrAmpEma * 0.50);
+    // The threshold is dynamically set to 65% of the recent average valid peak height
+    var dynAmpThr = Math.max(HR_MIN_AMP, hrAmpEma * 0.65);
 
     if (amp > dynAmpThr) {
 
@@ -341,8 +341,8 @@ function hrTick() {
         var ibi = now - hrLastBeat;
 
         // Dynamic refractory:
-        // Require at least 60% of previous interval to skip the dicrotic notch
-        var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.60);
+        // Require at least 75% of previous interval to skip the dicrotic notch
+        var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.75);
 
         if (ibi >= minDynamicIBI) {
           

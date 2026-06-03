@@ -587,7 +587,7 @@ face[0] = {
 
 // Redirect face (page 1)
 // handler_face.js routes page-0 non-clock off transitions into page 1,
-// so page 1 must exist for clean lifecycle behavior. [1](https://amwater-my.sharepoint.com/personal/jesse_quadrel_amwater_com/Documents/Microsoft%20Copilot%20Chat%20Files/handler_charge.js)[2](https://amwater-my.sharepoint.com/personal/jesse_quadrel_amwater_com/Documents/Microsoft%20Copilot%20Chat%20Files/hello.js)[3](https://amwater-my.sharepoint.com/personal/jesse_quadrel_amwater_com/Documents/Microsoft%20Copilot%20Chat%20Files/dashGarage.js)
+// so page 1 must exist for clean lifecycle behavior.
 face[1] = {
   offms: 1000,
 

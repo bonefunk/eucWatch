@@ -11,6 +11,7 @@
 // - redraws synchronized to exact second boundaries
 // - accel wake/raise-to-wake disabled while app is active
 //   and restored on exit
+// - proper face[1] redirect face for clean framework-compatible exits
 
 var G = w.gfx;
 
@@ -46,12 +47,11 @@ var HR_MIN_IBI = 320;   // ~187 bpm max
 var HR_MAX_IBI = 1500;  // 40 bpm min
 
 // Updated EMA coefficients for a 25Hz (40ms) sample rate
-var HR_BASELINE_ALPHA = 0.08; // ~0.5 Hz-ish drift removal
-var HR_SMOOTH_ALPHA   = 0.60; // preserves pulse shape but smooths noise
+var HR_BASELINE_ALPHA = 0.08;
+var HR_SMOOTH_ALPHA   = 0.60;
 
 // Beat acceptance
 var HR_MIN_AMP = 20;
-var hrArmed = 0;
 
 // RR handling
 var HR_RR_BUF_N = 4;
@@ -286,96 +286,96 @@ function hrUpdateDisplayFromRR(now) {
 // ----------------------
 
 function hrTick() {
- var bus = getBus();
- if (!bus || !hrOn)
-   return;
+  var bus = getBus();
+  if (!bus || !hrOn)
+    return;
 
- var raw = hrReadCH0(bus);
- hrRaw = raw;
+  var raw = hrReadCH0(bus);
+  hrRaw = raw;
 
- if (!hrBaseline) {
-   hrBaseline = raw;
-   hrFilt = 0;
-   hrPrev2 = 0;
-   hrPrev1 = 0;
-   hrValley = 0;
-   hrHaveValley = 1;
-   hrAmpEma = HR_MIN_AMP * 2;
-   hrArmed = 0; // Initialize armed state
-   return;
- }
+  if (!hrBaseline) {
+    hrBaseline = raw;
+    hrFilt = 0;
+    hrPrev2 = 0;
+    hrPrev1 = 0;
+    hrValley = 0;
+    hrHaveValley = 1;
+    hrAmpEma = HR_MIN_AMP * 2;
+    return;
+  }
 
- // 1) DC Removal
- hrBaseline = hrBaseline + HR_BASELINE_ALPHA * (raw - hrBaseline);
- var ac = raw - hrBaseline;
+  // 1) DC Removal (High-pass)
+  hrBaseline = hrBaseline + HR_BASELINE_ALPHA * (raw - hrBaseline);
+  var ac = raw - hrBaseline;
 
- // 2) Noise Removal
- hrFilt = hrFilt + HR_SMOOTH_ALPHA * (ac - hrFilt);
+  // 2) Noise Removal (Low-pass)
+  hrFilt = hrFilt + HR_SMOOTH_ALPHA * (ac - hrFilt);
 
- // 3) Decay the expected amplitude
- hrAmpEma *= 0.995;
- if (hrAmpEma < HR_MIN_AMP) hrAmpEma = HR_MIN_AMP;
+  // 3) Decay expected amplitude so threshold can recover downward
+  hrAmpEma *= 0.995;
+  if (hrAmpEma < HR_MIN_AMP) hrAmpEma = HR_MIN_AMP;
 
- var now = Date.now();
+  var now = Date.now();
 
- // CRITICAL FIX: Arm the detector only when the signal drops below the zero baseline.
- // This guarantees we are in the "valley" between beats and prevents falling-edge noise from triggering.
- if (hrFilt < 0) {
-   hrArmed = 1;
- }
+  // Track valley continuously
+  if (!hrHaveValley || hrFilt < hrValley) {
+    hrValley = hrFilt;
+    hrHaveValley = 1;
+  }
 
- // Track valley continuously
- if (!hrHaveValley || hrFilt < hrValley) {
-   hrValley = hrFilt;
-   hrHaveValley = 1;
- }
+  // Local peak detection
+  if (hrPrev1 > hrPrev2 && hrPrev1 >= hrFilt) {
 
- // Local peak detection
- if (hrPrev1 > hrPrev2 && hrPrev1 >= hrFilt) {
+    var peak = hrPrev1;
+    var amp = peak - hrValley;
 
-   var peak = hrPrev1;
-   var amp = peak - hrValley;
-   var dynAmpThr = Math.max(HR_MIN_AMP, hrAmpEma * 0.50);
+    var dynAmpThr = Math.max(HR_MIN_AMP, hrAmpEma * 0.50);
 
-   // Only evaluate the peak if the detector is armed
-   if (hrArmed && amp > dynAmpThr) {
+    if (amp > dynAmpThr) {
 
-     if (!hrLastBeat) {
-       hrLastBeat = now;
-       hrArmed = 0; // Disarm immediately
-     } else {
-       var ibi = now - hrLastBeat;
-       var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.60);
+      if (!hrLastBeat) {
+        // First plausible beat primes detector
+        hrLastBeat = now;
+      } else {
+        var ibi = now - hrLastBeat;
 
-       if (ibi >= minDynamicIBI) {
+        // Dynamic refractory:
+        // Require at least 60% of previous interval to skip dicrotic notch
+        var minDynamicIBI = Math.max(HR_MIN_IBI, hrLastIBI * 0.60);
 
-         hrLastBeat = now;
-         hrValley = hrFilt;
-         hrArmed = 0; // CRITICAL: Disarm until the signal drops below 0 again
+        if (ibi >= minDynamicIBI) {
 
-         if (ibi <= HR_MAX_IBI) {
-           hrLastIBI = ibi;
+          // Critical fix: resync beat timer even if this interval is too long for BPM use
+          hrLastBeat = now;
 
-           var safeAmp = Math.min(amp, hrAmpEma * 3);
-           hrAmpEma = (hrAmpEma * 0.80) + (safeAmp * 0.20);
+          // Reset valley to prep for the next wave cycle
+          hrValley = hrFilt;
 
-           hrPushRR(ibi);
-           hrUpdateDisplayFromRR(now);
-         }
-       }
-     }
-   }
- }
+          // Only use this interval for BPM if it is contiguous enough
+          if (ibi <= HR_MAX_IBI) {
+            hrLastIBI = ibi;
 
- // Blanking: hold last BPM longer before clearing
- if (hrLastReliableAt && (now - hrLastReliableAt) > 15000) {
-   hrBpm = null;
-   hrRR = [];
-   hrLastReliableAt = 0;
- }
+            // Clamp amplitude impact so a giant artifact doesn't permanently deafen threshold
+            var safeAmp = Math.min(amp, hrAmpEma * 3);
+            hrAmpEma = (hrAmpEma * 0.80) + (safeAmp * 0.20);
 
- hrPrev2 = hrPrev1;
- hrPrev1 = hrFilt;
+            hrPushRR(ibi);
+            hrUpdateDisplayFromRR(now);
+          }
+        }
+      }
+    }
+  }
+
+  // Hold last BPM longer before blanking
+  if (hrLastReliableAt && (now - hrLastReliableAt) > 15000) {
+    hrBpm = null;
+    hrRR = [];
+    hrLastReliableAt = 0;
+  }
+
+  hrPrev2 = hrPrev1;
+  hrPrev1 = hrFilt;
 }
 
 function hrStartLoop() {
@@ -532,9 +532,10 @@ function resetSW() {
 }
 
 // ----------------------
-// eucWatch face
+// eucWatch faces
 // ----------------------
 
+// Main stopwatch face (page 0)
 face[0] = {
   offms: 600000,
 
@@ -542,8 +543,7 @@ face[0] = {
 
     hardCleanup(true);
 
-    // Critical fix for this watch model:
-    // disable accel wake while the stopwatch app is active
+    // Disable accel wake while stopwatch is active
     suspendAccelWake();
 
     running = 0;
@@ -569,7 +569,7 @@ face[0] = {
   clear: function () {
     hardCleanup(true);
 
-    // Restore user's normal accel behavior
+    // restore user's normal accel behavior
     resumeAccelWake();
 
     return 1;
@@ -578,10 +578,41 @@ face[0] = {
   off: function () {
     hardCleanup(true);
 
-    // Restore user's normal accel behavior
+    // restore user's normal accel behavior
     resumeAccelWake();
 
     G.off();
+  }
+};
+
+// Redirect face (page 1)
+// handler_face.js routes page-0 non-clock off transitions into page 1,
+// so page 1 must exist for clean lifecycle behavior. [1](https://amwater-my.sharepoint.com/personal/jesse_quadrel_amwater_com/Documents/Microsoft%20Copilot%20Chat%20Files/handler_charge.js)[2](https://amwater-my.sharepoint.com/personal/jesse_quadrel_amwater_com/Documents/Microsoft%20Copilot%20Chat%20Files/hello.js)[3](https://amwater-my.sharepoint.com/personal/jesse_quadrel_amwater_com/Documents/Microsoft%20Copilot%20Chat%20Files/dashGarage.js)
+face[1] = {
+  offms: 1000,
+
+  init: function () {
+    return 1;
+  },
+
+  show: function () {
+
+    // Ensure everything is truly stopped
+    hardCleanup(true);
+    resumeAccelWake();
+
+    // Go to a known-good face
+    face.go("clock", 0);
+
+    return 1;
+  },
+
+  clear: function () {
+    return 1;
+  },
+
+  off: function () {
+    this.clear();
   }
 };
 

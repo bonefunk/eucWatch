@@ -1,16 +1,16 @@
 // sail.js
 // 3-minute sailing race start timer for eucWatch / P8 / P22
 //
-// Updated version:
+// Framework-compatible version:
+// - proper face[1] redirect face
 // - side button is the supported exit path
 // - swipe ignored
 // - stronger cleanup
 // - guaranteed single timer loop
-// - safer long-press behavior
 // - no accidental reset while running
 // - after countdown finishes, auto-return to main after ~10 seconds
-// - accel wake / raise-to-wake disabled while app is active,
-//   then restored on exit
+// - accel wake / raise-to-wake disabled while app is active
+//   and restored on exit
 
 var T = 180;   // total countdown seconds
 var R = 180;   // remaining seconds
@@ -22,15 +22,15 @@ var D = -1;    // post-finish delayed return timeout
 
 var G = w.gfx;
 
-// suppress stray tap after long press / exit
 var ignoreTapUntil = 0;
 
 // ----------------------
 // Accel wake control
 // ----------------------
 
-// Uploaded accel handlers show raise-to-wake can directly call face.off()
-// while the watch is worn/rotated, so disable it while Sail is active
+// Uploaded accel handlers show that raise-to-wake can directly call face.off()
+// based on wrist orientation, so disable it while Sail is active
+// and restore the user's normal accel setting on exit. 
 
 function suspendAccelWake() {
   if (typeof acc !== "undefined" && acc && acc.off)
@@ -82,14 +82,14 @@ function F() {
   G.setColor(0, 0);
   G.fillRect(0, 0, W - 1, H - 1);
 
-  // all-white UI
+  // white UI
   G.setColor(1, 15);
 
   // main countdown
   G.setFont("Vector", 60);
   G.drawString(t, (W - G.stringWidth(t)) / 2, 70);
 
-  // status line
+  // status
   G.setFont("Vector", 20);
 
   var status;
@@ -102,7 +102,7 @@ function F() {
 
   G.drawString(status, (W - G.stringWidth(status)) / 2, 160);
 
-  // hint line
+  // hint
   G.setFont("Vector", 14);
 
   var hint;
@@ -127,7 +127,7 @@ function B(x) {
     buzzer.sys(x);
 }
 
-// race countdown cues
+// Race countdown cues
 function C() {
 
   if (R == 180) {
@@ -145,7 +145,7 @@ function C() {
   }
 }
 
-// align updates to the next second boundary
+// Align updates to next second boundary
 function N() {
 
   if (!A)
@@ -185,13 +185,13 @@ function scheduleDoneExit() {
 
     D = -1;
 
-    // cleanly leave Sail and restore normal watch accel behavior
+    // Cleanly leave Sail and restore normal accel behavior
     X();
     resumeAccelWake();
 
     ignoreTapUntil = Date.now() + 500;
 
-    face.go("main", 0);
+    face.go("clock", 0);
 
   }, 10000);
 }
@@ -214,7 +214,7 @@ function startTimer() {
     D = -1;
   }
 
-  // disable raise-to-wake while the countdown is active
+  // Disable raise-to-wake while countdown is active
   suspendAccelWake();
 
   setRunAwake();
@@ -253,9 +253,10 @@ function resetTimer() {
 }
 
 // ----------------------
-// eucWatch face
+// eucWatch faces
 // ----------------------
 
+// Main Sail face (page 0)
 face[0] = {
 
   offms: 300000,
@@ -265,8 +266,7 @@ face[0] = {
     // defensive cleanup
     X();
 
-    // disable accel wake while Sail is open.
-    // This prevents wrist-lower accel logic from interfering with the face.
+    // suspend accel wake while Sail is active
     suspendAccelWake();
 
     R = T;
@@ -282,11 +282,13 @@ face[0] = {
   show: function () {
 
     if (!A) {
+
       // no active countdown, no periodic loop needed
       if (I >= 0) {
         clearTimeout(I);
         I = -1;
       }
+
       return;
     }
 
@@ -309,10 +311,10 @@ face[0] = {
       // countdown complete
       A = 0;
 
-      // back to normal idle timeout policy
+      // back to normal idle timeout
       setIdleAwake();
 
-      // show DONE / 0:00 and then return to main after 10s
+      // show DONE / 0:00 and then return to clock after 10s
       F();
       scheduleDoneExit();
 
@@ -354,6 +356,37 @@ face[0] = {
   }
 };
 
+// Redirect face (page 1)
+// handler_face.js routes page-0 non-clock off transitions into page 1,
+// so page 1 must exist for clean lifecycle behavior. [1](https://amwater-my.sharepoint.com/personal/jesse_quadrel_amwater_com/Documents/Microsoft%20Copilot%20Chat%20Files/handler_charge.js)[2](https://amwater-my.sharepoint.com/personal/jesse_quadrel_amwater_com/Documents/Microsoft%20Copilot%20Chat%20Files/hello.js)[3](https://amwater-my.sharepoint.com/personal/jesse_quadrel_amwater_com/Documents/Microsoft%20Copilot%20Chat%20Files/dashGarage.js)
+face[1] = {
+  offms: 1000,
+
+  init: function () {
+    return 1;
+  },
+
+  show: function () {
+
+    // Ensure everything is truly stopped
+    X();
+    resumeAccelWake();
+
+    // Go to a known-good face
+    face.go("clock", 0);
+
+    return 1;
+  },
+
+  clear: function () {
+    return 1;
+  },
+
+  off: function () {
+    this.clear();
+  }
+};
+
 // ----------------------
 // Touch handling
 // ----------------------
@@ -362,7 +395,7 @@ face[0] = {
 // e==12 long press
 // e==1  swipe down
 //
-// Swipe is intentionally ignored for now.
+// Swipe is intentionally ignored.
 // Side button is the supported exit path.
 
 touchHandler[0] = function (e, x, y) {
@@ -399,7 +432,7 @@ touchHandler[0] = function (e, x, y) {
     if (!A) {
       startTimer();
     } else {
-      // optional tiny feedback when tap is ignored
+      // optional tiny feedback when tap ignored
       B(40);
     }
   }
